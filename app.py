@@ -1,16 +1,16 @@
-# app.py (Lightweight Reverse Proxy for Runflare)
+# app.py (Lightweight Single-Request Reverse Proxy for Runflare)
 import os
 import ssl
 import asyncio
 import httpx
 import websockets
+import json
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 app = FastAPI()
 
-# 🟢 آدرس اسپیس هاگینگ فیس شما (مغز متفکر اصلی)
-# می‌توانید این آدرس را تغییر دهید تا به اسپیس مد نظر شما اشاره کند
+# 🟢 آدرس اسپیس هاگینگ‌فیس جدید شما که کدهای اصلی رانفلر روی آن قرار دارد
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://opera8-runflare.hf.space").strip()
 HF_WS_URL = HF_SPACE_URL.replace("https://", "wss://") + "/ws"
 
@@ -30,7 +30,7 @@ ssl_context.verify_mode = ssl.CERT_NONE
 
 
 # =================================================================
-# ۱. مانیتورینگ و پروکسی اتصال‌های وب‌سوکت صوتی (/ws) به هاگینگ فیس
+# ۱. پایش و پروکسی اتصال‌های وب‌سوکت صوتی (/ws) به هاگینگ فیس
 # =================================================================
 @app.websocket("/ws")
 async def websocket_proxy_route(client_ws: WebSocket):
@@ -101,7 +101,7 @@ async def websocket_proxy_route(client_ws: WebSocket):
 
 
 # =================================================================
-# ۲. مسیر یاب و پروکسی سراسری و استریمینگ تمام درخواست‌های وب و API
+# ۲. مسیر یاب و پروکسی سراسری تک‌درخواستی (فوق‌العاده سریع و ایمن)
 # =================================================================
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def reverse_proxy_route(request: Request, path: str):
@@ -112,7 +112,7 @@ async def reverse_proxy_route(request: Request, path: str):
     headers.pop("host", None)
     headers.pop("content-length", None)
     
-    # فوروارد کردن آی‌پی واقعی کاربر جهت پایداری سهمیه اعتبارات
+    # فوروارد کردن آی‌پی واقعی کاربر جهت پایداری سهمیه اعتبارات دیسکی
     cf_ip = request.headers.get("CF-Connecting-IP")
     if cf_ip:
         headers["X-Forwarded-For"] = cf_ip
@@ -120,42 +120,39 @@ async def reverse_proxy_route(request: Request, path: str):
     url = f"{HF_SPACE_URL}/{path}"
     body = await request.body()
     
-    # دریافت استریم داده‌ها از هاگینگ‌فیس و تحویل آنی به کاربر (بدون بافر کردن در رم رانفلر)
-    async def generate_response():
-        async with httpx.AsyncClient(verify=False, timeout=300.0) as client_local:
-            async with client_local.stream(
+    # 🟢 تعریف کلاینت ناهمگام تک‌منظوره جهت ارسال و بستن کانکشن در پس‌زمینه
+    client = httpx.AsyncClient(verify=False, timeout=300.0)
+    
+    try:
+        # 🟢 ارسال فقط و فقط یک درخواست واحد استریمینگ به هاگینگ‌فیس (حل مشکل تکرار درخواست ساخت)
+        response = await client.send(
+            client.build_request(
                 request.method,
                 url,
                 content=body,
                 headers=headers,
                 params=dict(request.query_params)
-            ) as resp:
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
-
-    # دریافت متادیتای هدرها از هاگینگ‌فیس
-    async with httpx.AsyncClient(verify=False, timeout=300.0) as client_headers:
-        resp_headers = await client_headers.request(
-            request.method,
-            url,
-            content=body,
-            headers=headers,
-            params=dict(request.query_params)
+            ),
+            stream=True
         )
         
-    # آماده‌سازی هدرهای پاسخ برای بازگرداندن به مرورگر کاربر
-    headers_to_return = dict(resp_headers.headers)
-    headers_to_return.pop("content-encoding", None)
-    headers_to_return.pop("content-length", None)
-    headers_to_return.pop("transfer-encoding", None)
-    
-    # تزریق هدرهای دسترسی و کرس (CORS)
-    for k, v in PERMISSION_HEADERS.items():
-        headers_to_return[k] = v
+        # آماده‌سازی هدرهای پاسخ برای بازگرداندن به مرورگر کاربر
+        headers_to_return = dict(response.headers)
+        headers_to_return.pop("content-encoding", None)
+        headers_to_return.pop("content-length", None)
+        headers_to_return.pop("transfer-encoding", None)
         
-    return StreamingResponse(
-        generate_response(),
-        status_code=resp_headers.status_code,
-        headers=headers_to_return,
-        media_type=resp_headers.headers.get("content-type")
-    )
+        # تزریق هدرهای دسترسی و کرس (CORS)
+        for k, v in PERMISSION_HEADERS.items():
+            headers_to_return[k] = v
+            
+        return StreamingResponse(
+            response.aiter_bytes(),
+            status_code=response.status_code,
+            headers=headers_to_return,
+            media_type=response.headers.get("content-type"),
+            background=client.aclose # بستن امن اتصال کلاینت پس از پایان انتقال بایت‌ها
+        )
+    except Exception as e:
+        await client.aclose()
+        return JSONResponse({"status": "error", "message": f"Proxy connection failed: {str(e)}"}, status_code=500)
