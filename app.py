@@ -1,4 +1,3 @@
-# app.py (Lightweight Single-Request Reverse Proxy for Runflare)
 import os
 import ssl
 import asyncio
@@ -101,7 +100,16 @@ async def websocket_proxy_route(client_ws: WebSocket):
 
 
 # =================================================================
-# ۲. مسیر یاب و پروکسی سراسری تک‌درخواستی (فوق‌العاده سریع و ایمن)
+# ۲. مسیر اختصاصی برای درخواست‌های HEAD ربات‌های مانیتورینگ (UptimeRobot)
+# =================================================================
+@app.head("/")
+async def uptime_robot_head_ping():
+    # بازگرداندن پاسخ ۲۰۰ موفقیت‌آمیز و سریع جهت بیدار نگه داشتن برنامه در رانفلر
+    return JSONResponse(content={"status": "alive"})
+
+
+# =================================================================
+# ۳. مسیر یاب و پروکسی سراسری تک‌درخواستی (فوق‌العاده سریع و ایمن)
 # =================================================================
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def reverse_proxy_route(request: Request, path: str):
